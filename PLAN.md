@@ -48,7 +48,7 @@ submanager/
 │   │   └── token.go           # 订阅 Token 认证中间件
 │   ├── router/
 │   │   └── router.go          # 路由注册
-│   └── router/
+│   └── tests/
 │       └── router_test.go     # 路由集成测试
 ├── frontend/
 │   ├── Dockerfile
@@ -97,21 +97,25 @@ submanager/
 
 ## 数据模型
 
+> **设计原则**：关联关系使用外键 + 关联表，避免 JSON 数组存储 ID 列表（确保引用完整性和级联删除）。用户流量限额实时从关联套餐计算，避免双重存储不一致。
+
 ### users（用户）
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | id | uint | 主键 |
 | username | string(64) | 用户名（唯一索引）|
 | password_hash | string(256) | bcrypt 加密密码 |
-| plan_id | *uint | 关联套餐（外键）|
+| plan_id | *uint | 关联套餐（外键 → plans.id，ON DELETE SET NULL）|
 | sub_token | string(32) | 订阅令牌（唯一索引，自动生成）|
 | traffic_used | int64 | 已用流量（字节）|
-| traffic_limit | int64 | 流量限额（字节，由套餐同步）|
 | expire_at | *time | 到期时间 |
+| traffic_reset_at | *time | 流量周期重置时间（套餐 duration_days 到期后重置 traffic_used）|
 | is_admin | bool | 是否管理员（默认 false）|
 | enabled | bool | 是否启用（默认 true）|
 | created_at | time | 创建时间 |
 | updated_at | time | 更新时间 |
+
+> **流量限额**：`traffic_limit` 不存储在 users 表中，而是通过 `user.plan_id → plan.traffic_limit` 实时查询。好处：修改套餐限额立即生效，无需批量同步。
 
 ### plans（套餐）
 | 字段 | 类型 | 说明 |
@@ -122,7 +126,6 @@ submanager/
 | traffic_limit | int64 | 流量限额（字节）|
 | duration_days | int | 有效天数（0=永久）|
 | price | string | 价格展示（如"¥10/月"，仅展示用）|
-| group_ids | json(uint[]) | 可用服务群 ID 列表 |
 | enabled | bool | 是否启用 |
 | created_at | time | 创建时间 |
 | updated_at | time | 更新时间 |
@@ -143,18 +146,48 @@ submanager/
 | created_at | time | 创建时间 |
 | updated_at | time | 更新时间 |
 
+> **SSRF 防护**：后端在拉取订阅 URL 时，需校验目标 IP 不在内网范围（10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, [::1]/128），拒绝指向本地/链路层/云元数据地址的请求。
+
+> **raw 类型说明**：当 `type=raw` 时，`url` 为空，节点数据通过管理后台手动粘贴 Base64 编码的节点列表，后端直接解析写入 node_cache。
+
 ### service_groups（服务群）
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | id | uint | 主键 |
 | name | string(64) | 群名称 |
 | description | string(256) | 群描述 |
-| sub_source_ids | json(uint[]) | 包含的订阅源 ID |
-| agent_ids | json(uint[]) | 包含的 Agent ID |
 | sort_order | int | 排序权重 |
 | enabled | bool | 是否启用 |
 | created_at | time | 创建时间 |
 | updated_at | time | 更新时间 |
+
+### 关联表（替代 JSON 数组）
+
+#### plan_service_groups（套餐 ↔ 服务群）
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| plan_id | uint | 外键 → plans.id（ON DELETE CASCADE）|
+| service_group_id | uint | 外键 → service_groups.id（ON DELETE CASCADE）|
+
+**联合主键**: `(plan_id, service_group_id)`
+
+#### group_subscription_sources（服务群 ↔ 订阅源）
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| service_group_id | uint | 外键 → service_groups.id（ON DELETE CASCADE）|
+| subscription_source_id | uint | 外键 → subscription_sources.id（ON DELETE CASCADE）|
+
+**联合主键**: `(service_group_id, subscription_source_id)`
+
+#### group_agents（服务群 ↔ Agent）
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| service_group_id | uint | 外键 → service_groups.id（ON DELETE CASCADE）|
+| agent_id | uint | 外键 → agents.id（ON DELETE CASCADE）|
+
+**联合主键**: `(service_group_id, agent_id)`
+
+> **设计优势**：删除套餐/服务群/订阅源/Agent 时，数据库自动清理关联关系，不会产生孤儿数据。
 
 ### agents（VPS Agent）
 | 字段 | 类型 | 说明 |
@@ -165,7 +198,7 @@ submanager/
 | server_addr | string(128) | 服务器地址 |
 | port | int | 端口 |
 | protocol | string(16) | vless / vmess / shadowsocks / snell / trojan |
-| protocol_config | json(map) | 协议参数（UUID/加密方式/传输层等）|
+| protocol_config | json(map) | 协议参数（见下方协议参数 Schema）|
 | traffic_used | int64 | 已用流量 |
 | traffic_total | int64 | 总流量 |
 | cpu_usage | float64 | CPU 使用率（Agent 上报）|
@@ -175,6 +208,34 @@ submanager/
 | enabled | bool | 是否启用 |
 | created_at | time | 创建时间 |
 | updated_at | time | 更新时间 |
+
+### protocol_config Schema（按协议）
+
+```jsonc
+// vless
+{ "uuid": "string(必填)", "transport": "ws|grpc|tcp(必填)",
+  "path": "string", "host": "string", "sni": "string",
+  "tls": "bool", "flow": "xtls-rprx-vision|空" }
+
+// vmess
+{ "uuid": "string(必填)", "alterId": "int(默认0)",
+  "security": "auto|aes-128-gcm|chacha20-poly1305(必填)",
+  "transport": "ws|grpc|tcp(必填)", "path": "string",
+  "host": "string", "sni": "string", "tls": "bool" }
+
+// shadowsocks
+{ "method": "aes-256-gcm|chacha20-ietf-poly1305|...(必填)",
+  "password": "string(必填)", "plugin": "obfs-local|v2ray-plugin|空",
+  "plugin_opts": "string" }
+
+// trojan
+{ "password": "string(必填)", "sni": "string", "transport": "ws|grpc|tcp",
+  "path": "string", "host": "string" }
+
+// snell
+{ "psk": "string(必填)", "version": "1|2|3(必填)",
+  "obfs": "http|tls|空", "obfs_host": "string" }
+```
 
 ### node_cache（节点缓存）
 | 字段 | 类型 | 说明 |
@@ -192,6 +253,12 @@ submanager/
 
 **索引**: `(source_type, source_id)` 组合索引
 
+> **缓存清理策略**：
+> 1. 每次订阅源刷新时，先删除 `source_type="subscription", source_id=<该源ID>` 的全部旧缓存，再写入新数据（全量替换）
+> 2. Agent 上报时同理，全量替换该 Agent 的缓存节点
+> 3. 删除订阅源或 Agent 时，CASCADE 清理对应缓存
+> 4. 无需 TTL——节点缓存始终与来源同步，不存在"过期但未清理"的中间态
+
 ---
 
 ## API 设计
@@ -204,6 +271,20 @@ GET    /api/user/profile            # 当前用户信息（JWT）
 GET    /api/user/subscription       # 订阅详情（套餐、流量、节点数预览）
 PUT    /api/user/password           # 修改密码
 ```
+
+### 系统初始化（仅首次部署，自动执行）
+```
+POST   /api/system/init            # 初始化管理员（仅无管理员时可用）
+   Body: { "username": "admin", "password": "xxx", "init_token": "<INIT_TOKEN>" }
+   说明: init_token 从环境变量 INIT_TOKEN 读取，部署脚本自动注入后清除。
+         若数据库已存在管理员账户，此接口返回 409 拒绝执行。
+```
+
+> **安全设计**：不再使用无保护的 `/api/admin/init` 接口。改为：
+> 1. 部署脚本生成随机 `INIT_TOKEN` 写入 .env
+> 2. 后端启动时读取 `INIT_TOKEN`，初始化完成后从内存中清除
+> 3. `POST /api/system/init` 必须携带正确的 init_token 且数据库无管理员时才生效
+> 4. 成功后该接口永久返回 409（已有管理员）
 
 ### 订阅输出（Token 认证，无需登录）
 ```
@@ -294,9 +375,11 @@ GET    /api/agent/config/:token
     ↓
 Token 中间件 → 查询 users 表 → 验证 enabled/expire_at/traffic
     ↓
-查询 user.plan_id → plans.group_ids
+查询 user.plan_id → plans.traffic_limit（实时计算流量限额，无需同步）
     ↓
-查询 service_groups → 关联的 sub_source_ids + agent_ids
+查询 plan_service_groups → 获取该套餐关联的 service_group 列表
+    ↓
+查询 group_subscription_sources + group_agents → 获取各服务群关联的订阅源和 Agent
     ↓
 从 node_cache 聚合所有节点
     ↓
@@ -309,11 +392,13 @@ Token 中间件 → 查询 users 表 → 验证 enabled/expire_at/traffic
 ```
 管理员添加 SubStore URL → 保存 subscription_sources
     ↓
-定时任务 / 手动触发 → HTTP GET 拉取内容
+定时任务 / 手动触发 → 校验 URL（SSRF 防护：拒绝内网/链路层/元数据地址）
     ↓
-Base64 解码 → 逐行解析 vless:// vmess:// ss:// trojan:// 链接
+HTTP GET 拉取内容 → Base64 解码 → 逐行解析 vless:// vmess:// ss:// trojan:// 链接
     ↓
-解析为统一 Node 结构 → 清除旧缓存 → 写入 node_cache
+解析为统一 Node 结构 → 删除该源旧缓存（DELETE node_cache WHERE source_type="subscription" AND source_id=X）
+    ↓
+写入新缓存到 node_cache
     ↓
 更新 subscription_sources.node_count / last_fetch_at
 ```
@@ -393,6 +478,7 @@ Token 中间件 → 查询 agents 表 → 验证 token
 APP_ENV=development          # development / production
 APP_PORT=8080
 APP_SECRET=your-secret-key   # JWT 签名密钥
+INIT_TOKEN=                  # 管理员初始化令牌（部署时随机生成，初始化后失效）
 
 # 数据库
 DB_DRIVER=sqlite             # sqlite / postgres
@@ -469,6 +555,7 @@ services:
       APP_ENV: production
       APP_PORT: 8080
       APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
+      INIT_TOKEN: ${INIT_TOKEN:?INIT_TOKEN is required}
       DB_DRIVER: postgres
       DB_DSN: postgres://${DB_USER:-submgr}:${DB_PASSWORD}@submgr-postgres:5432/${DB_NAME:-submanager}?sslmode=disable
       SUB_BASE_URL: ${SUB_BASE_URL:-http://localhost}
@@ -488,9 +575,9 @@ services:
       - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./frontend/dist:/usr/share/nginx/html:ro
       - ${SSL_CERT_PATH:-/dev/null}:/etc/nginx/ssl/cert.pem:ro
       - ${SSL_KEY_PATH:-/dev/null}:/etc/nginx/ssl/key.pem:ro
-      - submgr-frontend:/usr/share/nginx/html:ro
     depends_on:
       - submgr-app
     networks:
@@ -499,8 +586,6 @@ services:
 volumes:
   submgr-pgdata:
     name: submgr-pgdata
-  submgr-frontend:
-    name: submgr-frontend
 
 networks:
   submgr-net:
@@ -539,10 +624,14 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-# 输出阶段 — 仅将 dist 目录复制到卷
-FROM alpine:3.19 AS dist
-COPY --from=builder /build/dist /dist
+# 运行阶段 — 将 dist 复制到固定路径，由 deploy.sh 处理卷挂载
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates
+WORKDIR /dist
+COPY --from=builder /build/dist .
 ```
+
+> **前端产物注入流程**：前端容器仅负责构建。`deploy.sh` 在构建后执行 `docker cp` 将前端容器中的 `/dist` 内容复制到宿主机目录（如 `./frontend/dist/`），然后 nginx 容器通过 bind mount 挂载该目录。不再使用 Docker volume，简化流程。
 
 ### Nginx 反向代理配置
 
@@ -600,6 +689,7 @@ server {
 | HTTP_PORT | 外部 HTTP 端口 | 80 | 是 |
 | HTTPS_PORT | 外部 HTTPS 端口 | 443 | 否 |
 | APP_SECRET | JWT 密钥 | 随机生成 | 是 |
+| INIT_TOKEN | 管理员初始化令牌 | 随机生成 | 是（自动） |
 | DB_PASSWORD | 数据库密码 | 随机生成 | 是 |
 | SUB_BASE_URL | 订阅基础 URL | http://当前IP:端口 | 是 |
 | ADMIN_USERNAME | 管理员用户名 | admin | 是 |
@@ -607,6 +697,7 @@ server {
 | ALLOW_REGISTER | 允许用户注册 | true | 否 |
 | SUB_REFRESH_INTERVAL | 订阅源刷新间隔(分钟) | 30 | 否 |
 | AGENT_REPORT_INTERVAL | Agent 上报间隔(秒) | 60 | 否 |
+| AGENT_OFFLINE_TIMEOUT | Agent 离线判定超时(秒) | 180 | 否 |
 
 ### 脚本流程伪代码
 
@@ -642,6 +733,8 @@ configure() {
     read_input "ADMIN_USERNAME" "管理员用户名" "admin"
     read_input "ADMIN_PASSWORD" "管理员密码（留空自动生成）" ""
     [ -z "$ADMIN_PASSWORD" ] && ADMIN_PASSWORD=$(openssl rand -hex 8)
+    # 生成管理员初始化令牌
+    INIT_TOKEN=$(openssl rand -hex 16)
     read_input "ALLOW_REGISTER" "允许用户注册 (true/false)" "true"
     confirm_config  # 展示配置摘要，确认后继续
 }
@@ -651,6 +744,7 @@ write_env() {
     cat > .env <<EOF
 HTTP_PORT=${HTTP_PORT}
 APP_SECRET=${APP_SECRET}
+INIT_TOKEN=${INIT_TOKEN}
 DB_PASSWORD=${DB_PASSWORD}
 SUB_BASE_URL=${SUB_BASE_URL}
 ADMIN_USERNAME=${ADMIN_USERNAME}
@@ -662,8 +756,13 @@ EOF
 # 4. 构建前端
 build_frontend() {
     echo -e "${YELLOW}构建前端...${NC}"
+    # 构建前端 Docker 镜像并提取产物
     docker build -t submgr-frontend-builder ./frontend
-    # 将构建产物复制到卷或目录
+    # 创建临时容器，将 dist 复制到宿主机
+    docker create --name submgr-dist-temp submgr-frontend-builder
+    mkdir -p ./frontend/dist
+    docker cp submgr-dist-temp:/dist/. ./frontend/dist/
+    docker rm submgr-dist-temp
 }
 
 # 5. 构建并启动
@@ -680,9 +779,19 @@ deploy() {
 
 # 6. 初始化管理员
 init_admin() {
-    curl -s -X POST http://localhost:${HTTP_PORT}/api/admin/init \
+    # 等待后端就绪
+    retry_count=0
+    while [ $retry_count -lt 30 ]; do
+        if curl -sf http://localhost:${HTTP_PORT}/api/health > /dev/null 2>&1; then
+            break
+        fi
+        retry_count=$((retry_count + 1))
+        sleep 1
+    done
+
+    curl -sf -X POST http://localhost:${HTTP_PORT}/api/system/init \
         -H "Content-Type: application/json" \
-        -d "{\"username\":\"${ADMIN_USERNAME}\",\"password\":\"${ADMIN_PASSWORD}\"}"
+        -d "{\"username\":\"${ADMIN_USERNAME}\",\"password\":\"${ADMIN_PASSWORD}\",\"init_token\":\"${INIT_TOKEN}\"}"
 }
 
 # 7. 输出信息
