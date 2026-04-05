@@ -51,11 +51,14 @@ chmod +x deploy.sh
 |------|------|--------|
 | HTTP_PORT | 外部 HTTP 端口 | 80 |
 | APP_SECRET | JWT 密钥 | 自动生成 |
+| INIT_TOKEN | 管理员初始化令牌 | 自动生成 |
 | DB_PASSWORD | 数据库密码 | 自动生成 |
 | SUB_BASE_URL | 订阅基础 URL | 自动检测 |
 | ADMIN_USERNAME | 管理员用户名 | admin |
 | ADMIN_PASSWORD | 管理员密码 | 自动生成 |
 | ALLOW_REGISTER | 允许用户注册 | true |
+| AGENT_REPORT_INTERVAL | Agent 上报间隔(秒) | 60 |
+| AGENT_OFFLINE_TIMEOUT | Agent 离线判定超时(秒) | 180 |
 
 所有容器使用 `submgr-` 前缀隔离：
 - `submgr-nginx` — Nginx 反向代理
@@ -67,6 +70,8 @@ chmod +x deploy.sh
 ```bash
 docker compose ps                           # 查看状态
 docker compose logs -f submgr-app           # 后端日志
+docker compose logs -f submgr-nginx         # Nginx 日志
+docker compose logs -f submgr-postgres      # 数据库日志
 docker compose down                         # 停止（保留数据）
 docker compose build --no-cache && docker compose up -d  # 重建更新
 ```
@@ -86,6 +91,9 @@ submanager/
 
 ## API 概览
 
+### 系统初始化
+- `POST /api/system/init` — 首次部署初始化管理员（需 INIT_TOKEN，仅一次有效）
+
 ### 用户端
 - `POST /api/auth/login` — 登录
 - `POST /api/auth/register` — 注册
@@ -96,6 +104,7 @@ submanager/
 - `GET /sub/:token?format=clash` — Clash YAML
 - `GET /sub/:token?format=singbox` — Sing-box JSON
 - `GET /sub/:token?format=base64` — Base64 节点列表
+- `GET /sub/:token?format=raw` — 原始节点链接（每行一个）
 
 ### Agent 上报
 - `POST /api/agent/report` — 心跳 + 流量 + 节点上报
@@ -115,11 +124,14 @@ submanager/
 | APP_ENV | 环境 | development |
 | APP_PORT | 后端端口 | 8080 |
 | APP_SECRET | JWT 密钥 | - |
+| INIT_TOKEN | 管理员初始化令牌（一次性） | - |
 | DB_DRIVER | 数据库驱动 | sqlite |
 | DB_DSN | 数据库连接串 | submanager.db |
 | SUB_BASE_URL | 订阅基础 URL | http://localhost:8080 |
+| SUB_REFRESH_INTERVAL | 订阅源自动刷新间隔(分钟) | 30 |
 | ALLOW_REGISTER | 允许注册 | true |
 | AGENT_REPORT_INTERVAL | Agent 上报间隔(秒) | 60 |
+| AGENT_OFFLINE_TIMEOUT | Agent 离线判定超时(秒) | 180 |
 
 ## 许可证
 
