@@ -142,4 +142,24 @@ func Setup(engine *gin.Engine, db *gorm.DB, cfg *config.Config) {
 		agent.GET("/install.sh", handler.AgentInstallScriptHandler)
 		agent.GET("/users", middleware.AgentTokenAuth(), handler.AgentUsersHandler)
 	}
+
+	// Serve frontend static files from /web directory (built into Docker image)
+	engine.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		// Skip API and subscription routes
+		if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/sub/") {
+			c.JSON(404, gin.H{"error": "not found"})
+			return
+		}
+		// Try static file
+		filePath := "./web" + path
+		if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
+			if _, err := http.Dir("./web").Open(path); err == nil {
+				c.File(filePath)
+				return
+			}
+		}
+		// SPA fallback: serve index.html for all other routes
+		c.File("./web/index.html")
+	})
 }
