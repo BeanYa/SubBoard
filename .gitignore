@@ -36,8 +36,8 @@ tmp/
 temp/
 
 # ===== AI 工具配置目录 =====
-# 保留 .agents/ 作为主配置，其余工具目录不纳入版本控制
-# 各工具可通过 symlink 或本地配置指向 .agents/ 内容
+.agents/
+skills/
 .augment/
 .claude/
 .codebuddy/
