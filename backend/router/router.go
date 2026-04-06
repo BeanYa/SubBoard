@@ -1,6 +1,9 @@
 package router
 
 import (
+	"net/http"
+	"strings"
+
 	"submanager/config"
 	"submanager/handler"
 	"submanager/middleware"
@@ -10,6 +13,50 @@ import (
 )
 
 func Setup(engine *gin.Engine, db *gorm.DB, cfg *config.Config) {
+	// CORS middleware - allow configured origins
+	if cfg.CORSOrigins != "" {
+		origins := strings.Split(cfg.CORSOrigins, ",")
+		engine.Use(func(c *gin.Context) {
+			origin := c.GetHeader("Origin")
+			if origin == "" {
+				c.Next()
+				return
+			}
+
+			allowed := false
+			for _, o := range origins {
+				o = strings.TrimSpace(o)
+				if o == "" {
+					continue
+				}
+				if origin == o {
+					allowed = true
+					break
+				}
+				// Wildcard subdomain: *.example.com
+				if strings.HasPrefix(o, "*.") {
+					suffix := o[1:] // ".example.com"
+					if strings.HasSuffix(origin, suffix) {
+						allowed = true
+						break
+					}
+				}
+			}
+
+			if allowed {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				c.Header("Access-Control-Max-Age", "86400")
+				if c.Request.Method == http.MethodOptions {
+					c.AbortWithStatus(http.StatusNoContent)
+					return
+				}
+			}
+			c.Next()
+		})
+	}
+
 	// Inject db and cfg into handlers via context
 	engine.Use(func(c *gin.Context) {
 		c.Set("db", db)

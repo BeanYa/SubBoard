@@ -19,6 +19,7 @@ type Config struct {
 	AdminPassword       string
 	AgentReportInterval int
 	AgentOfflineTimeout int
+	CORSOrigins         string
 }
 
 func LoadConfig() *Config {
@@ -36,6 +37,7 @@ func LoadConfig() *Config {
 		AdminPassword:       getEnv("ADMIN_PASSWORD", "admin"),
 		AgentReportInterval: getEnvInt("AGENT_REPORT_INTERVAL", 60),
 		AgentOfflineTimeout: getEnvInt("AGENT_OFFLINE_TIMEOUT", 180),
+		CORSOrigins:         getEnv("CORS_ORIGINS", ""),
 	}
 }
 
