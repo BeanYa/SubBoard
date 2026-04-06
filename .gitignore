@@ -55,5 +55,12 @@ temp/
 .windsurf/
 .zencoder/
 
+# Playwright MCP
+.playwright-mcp/
+
+# Misc downloads
+dy
+wget-log*
+
 # Lock files (auto-generated)
 skills-lock.json
