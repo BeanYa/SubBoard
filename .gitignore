@@ -4,6 +4,8 @@ frontend/node_modules/
 
 # Build outputs
 backend/submanager
+backend/submanager.exe
+backend/backend.pid
 frontend/dist/
 
 # Environment
