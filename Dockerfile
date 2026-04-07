@@ -7,7 +7,7 @@
 FROM node:20-alpine AS frontend-builder
 WORKDIR /build/frontend
 COPY frontend/package.json frontend/bun.lock* ./
-RUN npm install --registry=https://registry.npmmirror.com
+RUN npm install
 2>&1 | tail -1
 COPY frontend/ .
 RUN npm run build
@@ -16,9 +16,9 @@ RUN npm run build
 FROM golang:1.23-alpine AS backend-builder
 WORKDIR /build/backend
 COPY backend/go.mod backend/go.sum ./
-RUN GOPROXY=https://goproxy.cn,direct go mod download
+RUN GOTOOLCHAIN=auto go mod download
 COPY backend/ .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s" -0 -o /app/submanager
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s" -o /app/submanager
 
 # ---- Runtime ----
 FROM alpine:3.19
