@@ -1,8 +1,8 @@
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 WORKDIR /build
 COPY go.mod go.sum ./
-RUN GOPROXY=https://goproxy.cn,direct go mod download
+RUN GOTOOLCHAIN=auto go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o submanager .
 
